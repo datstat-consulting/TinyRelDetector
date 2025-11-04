@@ -1,4 +1,4 @@
-# DeepRelationalDetect
+# TinyRelDetector
 Relational coding as cognitive architecture was proposed by Green and Hummel (2004). Lipman et al (2024) confirm it by analyzing neural scans of epileptic patients. We use metric learning with a Wasserstein metric augmented by YOLOv9's mechanisms.
 
 # References
