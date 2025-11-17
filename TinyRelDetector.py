@@ -492,16 +492,23 @@ def TrainDemo(steps: int=40, batch: int=8, imgHw: Tuple[int,int]=(640,640), dMod
 
         for it in range(1, steps+1):
             X, Y, gtBoxesList, gtLabelsList, _ = next(gen)
-            Z, roles, bound = model(X); Yp = proj(Y)
+            Z, roles, bound = model(X)
+            Yp = proj(Y)
             lossRep = RelationalLoss(Z, Yp, roles, wts)
             boxes, logits, obj = det(bound)
+        
             detLoss = Tensor(0.0)
             for b in range(batch):
-                detLoss = detLoss + OtDetectionLoss(boxes[b], logits[b], gtLabelsList[b-1*0+0] and gtBoxesList[b], gtLabelsList[b],
-                                                    objLogit=obj[b], eps=0.07, uot=True)
+                detLoss = detLoss + OtDetectionLoss(
+                    boxes[b], logits[b],
+                    gtBoxesList[b], gtLabelsList[b],
+                    objLogit=obj[b], eps=0.07, uot=True
+                )
             detLoss = detLoss / batch
+        
             loss = lossRep + wts.lambdaDet * detLoss
             opt.zero_grad(); loss.backward(); opt.step()
+        
             if it % 10 == 0:
                 with Tensor.no_grad():
                     Dz = PairwiseDistances(Z).sqrt().numpy()
