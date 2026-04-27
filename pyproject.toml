@@ -1,0 +1,22 @@
+# pyproject.toml
+
+[project]
+name = "tiny-rel-detector"
+version = "0.1.0"
+description = "Relational visual learner in tinygrad with a Wasserstein detection head and YOLO-format loader."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "tinygrad",
+    "numpy",
+    "pillow",
+    "pyyaml",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["TinyRelDetector*"]
