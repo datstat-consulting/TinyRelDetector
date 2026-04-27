@@ -18,16 +18,20 @@ Relational coding as cognitive architecture was proposed by Green and Hummel (20
 ```text
 TinyRelDetector/
   README.md
+  pyproject.toml
   main.py
-  tinyrel_detector.py
+  TinyRelDetector/
+    __init__.py
+    tinyrel_detector.py
 ```
 
-`tinyrel_detector.py` contains the model, losses, YOLO loader, synthetic fallback data, and training functions.
+`TinyRelDetector/tinyrel_detector.py` contains the model, losses, YOLO loader, synthetic fallback data, and training functions.
 
 `main.py` contains the CLI entry point:
 
 ```python
-from tinyrel_detector import ParseArgs, TrainDemo
+from TinyRelDetector.tinyrel_detector import ParseArgs, TrainDemo
+
 
 if __name__ == "__main__":
     args = ParseArgs()
@@ -44,7 +48,25 @@ if __name__ == "__main__":
 
 ## Installation
 
-Install the core dependencies:
+Install locally from the repository root:
+
+```bash
+pip install -e .
+```
+
+The install/distribution name is:
+
+```text
+tiny-rel-detector
+```
+
+The Python import package is:
+
+```python
+import TinyRelDetector
+```
+
+Core dependencies:
 
 ```bash
 pip install tinygrad numpy
@@ -54,6 +76,23 @@ For YOLO-format datasets, also install:
 
 ```bash
 pip install pillow pyyaml
+```
+
+## Basic imports
+
+```python
+from TinyRelDetector import (
+    DetectionHead,
+    LossWeights,
+    RelationalBackbone,
+    TargetProjection,
+    TrainDemo,
+    ParseArgs,
+    SyntheticBatch,
+    YoloIterBatches,
+    OtDetectionLoss,
+    RelationalLoss,
+)
 ```
 
 ## Quick smoke test
