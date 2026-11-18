@@ -13,7 +13,14 @@ from .tinyrel_detector import (
     RelationalLoss,
 )
 
+from .relational import RelationalDetector
+from .pyramid import PyramidRelationalDetector
+from .yolo import VisionModel
+
 __all__ = [
+    "RelationalDetector",
+    "PyramidRelationalDetector",
+    "VisionModel",
     "DetectionHead",
     "LossWeights",
     "RelationalBackbone",

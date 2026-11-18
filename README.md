@@ -66,17 +66,7 @@ The Python import package is:
 import TinyRelDetector
 ```
 
-Core dependencies:
-
-```bash
-pip install tinygrad numpy
-```
-
-For YOLO-format datasets, also install:
-
-```bash
-pip install pillow pyyaml
-```
+The standard install includes tinygrad, NumPy, Pillow, safetensors, and PyYAML.
 
 ## Basic imports
 
@@ -288,6 +278,61 @@ Arguments:
 --batch      batch size
 --d_model    hidden dimension
 ```
+
+## Native checkpoints and detections
+
+~~~python
+from TinyRelDetector import RelationalDetector
+
+model = RelationalDetector(num_classes=3, image_size=(64, 64), roles=6)
+losses = model.fit(steps=20, batch=4)  # Supply data="dataset.yaml" to train on labeled images.
+model.save("relational.safetensors")
+detections = RelationalDetector.load("relational.safetensors").predict("image.jpg")
+~~~
+
+The native model reports class IDs, scores and pixel-coordinate XYXY boxes
+after class-wise non-maximum suppression.
+
+## Ultralytics workflows
+
+Install the optional backend with `python -m pip install '.[vision]'`. The `tinyrel` command
+uses Ultralytics models and datasets for standard computer-vision workflows.
+
+~~~bash
+tinyrel train --model yolov8n.yaml --data dataset.yaml --epochs 20
+tinyrel val --model runs/detect/train/weights/best.pt --data dataset.yaml
+tinyrel predict --model runs/detect/train/weights/best.pt --source photos --save
+tinyrel track --model runs/detect/train/weights/best.pt --source clip.mp4 --save
+tinyrel export --model runs/detect/train/weights/best.pt --format onnx
+~~~
+
+The Python `VisionModel` class exposes train, val, predict, track and export and
+passes task-specific options through to Ultralytics. Select a compatible model
+for segmentation, classification, pose or oriented boxes. Ultralytics handles
+media input, annotations, metrics and export. Native safetensors and
+Ultralytics checkpoints use distinct architectures.
+
+The `track` command accepts `--tracker bytetrack.yaml` or `--tracker botsort.yaml`.
+See [Vision benchmarks](BENCHMARKS.md) for COCO detection, segmentation and
+pose results, MOT17 results, and commands for reproducing them.
+
+## Native feature pyramid
+
+`PyramidRelationalDetector` is a single-class detector for small objects.
+Its tinygrad feature pyramid combines stride-4 spatial features with context
+from the slot and role-binding modules. It trains on image crops and merges
+boxes after overlapping tiled inference.
+
+~~~python
+from TinyRelDetector import PyramidRelationalDetector
+
+detector = PyramidRelationalDetector.load("runs/person-comparison/tiny-person-native.safetensors")
+detections = detector.predict("image.jpg")
+~~~
+
+The example loads the checkpoint produced by the video-disjoint training run
+described in [Vision benchmarks](BENCHMARKS.md), which also documents the
+evaluation procedure.
 
 ## References
 

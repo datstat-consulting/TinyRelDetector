@@ -6,15 +6,12 @@ import os
 import math
 import argparse
 import glob
+from itertools import cycle, islice
 import pathlib
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 import numpy as np
-
-# tinygrad env
-# os.environ.setdefault("CPU", "1")
-os.environ.setdefault("JIT", "0")
 
 from tinygrad import Tensor, dtypes
 from tinygrad.nn import Linear
@@ -35,11 +32,6 @@ try:
     import yaml
 except Exception:
     yaml = None
-
-
-# Seeds
-Tensor.manual_seed(42)
-np.random.seed(42)
 
 
 # Utils
@@ -326,7 +318,7 @@ def CxcywhToXyxy(boxes: Tensor) -> Tensor:
     x2 = cx + 0.5 * w
     y2 = cy + 0.5 * h
 
-    return Tensor.stack([x1, y1, x2, y2], dim=-1)
+    return Tensor.stack(x1, y1, x2, y2, dim=-1)
 
 
 def IoUMatrix(boxes1: Tensor, boxes2: Tensor) -> Tensor:
@@ -490,8 +482,8 @@ def SyntheticBatch(
         gtBoxes.append(Tensor(np.array([cx_n, cy_n, w_n, h_n], np.float32).reshape(-1, 4)))
         gtLabels.append(Tensor(np.array([c], np.int32)))
 
-    X = Tensor.stack(imgs)
-    Y = Tensor.stack(ys)
+    X = Tensor.stack(*imgs)
+    Y = Tensor.stack(*ys)
     Y = (Y - Y.mean(axis=1, keepdim=True)) / (Y.std(axis=1, keepdim=True) + 1e-8)
 
     return X, Y, gtBoxes, gtLabels, numClasses
@@ -514,8 +506,21 @@ def ReadYaml(path: str) -> dict:
     if yaml is None:
         raise ImportError("PyYAML not installed. pip install pyyaml")
 
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    with open(path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError("Dataset YAML must contain a mapping.")
+    return config
+
+
+def DatasetClassCount(config: dict) -> int:
+    names = config.get("names")
+    num_classes = len(names) if isinstance(names, (list, tuple, dict)) else int(config.get("nc", 0))
+    if num_classes < 1:
+        raise ValueError("Dataset YAML requires names or a positive nc.")
+    if isinstance(names, dict) and set(map(str, names)) != {str(i) for i in range(num_classes)}:
+        raise ValueError("Class name IDs must be contiguous from zero.")
+    return num_classes
 
 
 def GatherImageFiles(imagesDir: str) -> List[str]:
@@ -533,7 +538,7 @@ def LabelPathFor(imagePath: str, labelsDir: str) -> str:
     return str(pathlib.Path(labelsDir) / f"{stem}.txt")
 
 
-def ReadYoloTxt(labelPath: str) -> Tuple[np.ndarray, np.ndarray]:
+def ReadYoloTxt(labelPath: str, *, allow_segments=False) -> Tuple[np.ndarray, np.ndarray]:
     if not os.path.exists(labelPath):
         return np.zeros((0,), np.int32), np.zeros((0, 4), np.float32)
 
@@ -547,12 +552,25 @@ def ReadYoloTxt(labelPath: str) -> Tuple[np.ndarray, np.ndarray]:
                 continue
 
             parts = line.split()
-            if len(parts) != 5:
-                continue
+            if len(parts) == 5:
+                c, x, y, w, h = map(float, parts)
+            elif allow_segments and len(parts) >= 7 and len(parts) % 2 == 1:
+                c = float(parts[0])
+                polygon = np.array(parts[1:], dtype=float).reshape(-1, 2)
+                if not np.all(np.isfinite(polygon) & (polygon >= 0) & (polygon <= 1)):
+                    raise ValueError(f"Invalid normalized YOLO polygon in {labelPath}.")
+                left, top = polygon.min(axis=0)
+                right, bottom = polygon.max(axis=0)
+                x, y = (left + right) / 2, (top + bottom) / 2
+                w, h = right - left, bottom - top
+            else:
+                raise ValueError(f"Invalid YOLO label format in {labelPath}: {line!r}")
 
-            c, x, y, w, h = parts
-            clsIds.append(int(float(c)))
-            boxes.append([float(x), float(y), float(w), float(h)])
+            if (not c.is_integer() or c < 0 or not (0 <= x <= 1 and 0 <= y <= 1)
+                    or not (0 < w <= 1 and 0 < h <= 1)):
+                raise ValueError(f"Invalid normalized YOLO label in {labelPath}: {line!r}")
+            clsIds.append(int(c))
+            boxes.append([x, y, w, h])
 
     if len(clsIds) == 0:
         return np.zeros((0,), np.int32), np.zeros((0, 4), np.float32)
@@ -563,8 +581,9 @@ def ReadYoloTxt(labelPath: str) -> Tuple[np.ndarray, np.ndarray]:
 def LoadImage(path: str, H: int, W: int) -> Tensor:
     assert Image is not None, "Pillow not installed. pip install pillow"
 
-    img = Image.open(path).convert("RGB").resize((W, H))
-    arr = np.asarray(img, dtype=np.float32) / 255.0
+    with Image.open(path) as source:
+        img = source.convert("RGB").resize((W, H), Image.Resampling.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))
 
     return Tensor(arr)
@@ -582,28 +601,22 @@ def YoloIterBatches(
     if split not in y:
         raise ValueError(f"split '{split}' not found in {dataYaml}")
 
-    root = pathlib.Path(y.get("path", "."))
-    splitPath = pathlib.Path(y[split])
-    imagesDir = str(splitPath if splitPath.is_absolute() else root / splitPath)
-    labelsDir = ResolveLabelsDir(imagesDir)
-
-    names = y.get("names", [])
-    numClasses = len(names) if isinstance(names, (list, tuple)) else int(y.get("nc", 0))
-
-    files = GatherImageFiles(imagesDir)
-    if len(files) == 0:
+    if batch < 1:
+        raise ValueError("batch must be positive.")
+    config_dir = pathlib.Path(dataYaml).resolve().parent
+    root = config_dir / y.get("path", ".")
+    if not isinstance(y[split], str):
+        raise ValueError("The native detector requires a single image directory per split.")
+    imagesDir = root / y[split]
+    labelsDir = pathlib.Path(ResolveLabelsDir(str(imagesDir)))
+    numClasses = DatasetClassCount(y)
+    files = GatherImageFiles(str(imagesDir))
+    if not files:
         raise FileNotFoundError(f"No images found under: {imagesDir}")
 
-    i = 0
+    samples = cycle(files)
     while True:
-        batchFiles = files[i : i + batch]
-
-        if len(batchFiles) < batch:
-            rem = batch - len(batchFiles)
-            batchFiles += files[0:rem]
-            i = rem
-        else:
-            i += batch
+        batchFiles = islice(samples, batch)
 
         Xs = []
         gtBoxesList = []
@@ -612,8 +625,11 @@ def YoloIterBatches(
         for fp in batchFiles:
             Xs.append(LoadImage(fp, H, W))
 
-            lp = LabelPathFor(fp, labelsDir)
-            clsNp, boxNp = ReadYoloTxt(lp)
+            relative = pathlib.Path(fp).relative_to(imagesDir).with_suffix(".txt")
+            lp = labelsDir / relative
+            clsNp, boxNp = ReadYoloTxt(str(lp))
+            if np.any(clsNp >= numClasses):
+                raise ValueError(f"Class ID is outside the dataset vocabulary in {lp}.")
 
             gtBoxesList.append(Tensor(boxNp.reshape(-1, 4)))
             gtLabelsList.append(Tensor(clsNp.reshape(-1).astype(np.int32)))
@@ -633,8 +649,8 @@ def YoloIterBatches(
 
             Ys.append(Tensor((vec - vec.mean()) / (vec.std() + 1e-8)))
 
-        X = Tensor.stack(Xs)
-        Y = Tensor.stack(Ys)
+        X = Tensor.stack(*Xs)
+        Y = Tensor.stack(*Ys)
 
         yield X, Y, gtBoxesList, gtLabelsList, numClasses
 
@@ -672,163 +688,17 @@ def TrainDemo(
     dataYaml: Optional[str] = None,
     split: str = "train",
 ) -> None:
-    H, W = imgHw
-
-    if H % 8 != 0 or W % 8 != 0:
-        raise ValueError("Image height and width must both be divisible by patch size 8.")
+    from .relational import RelationalDetector
 
     if dataYaml is None:
-        X0, Y0, gtBoxes0, gtLabels0, numClasses = SyntheticBatch(batch, H, W)
-
-        proj = TargetProjection(dIn=Y0.shape[1], dOut=dModel)
-        model = RelationalBackbone(
-            dModel=dModel,
-            patch=8,
-            numSlots=2 * numRoles,
-            numRoles=numRoles,
-            nHead=4,
-        )
-        det = DetectionHead(dModel=dModel, numRoles=numRoles, numClasses=numClasses)
-
-        params = model.Parameters() + proj.Parameters() + det.Parameters()
-        EnableGrad(params)
-
-        opt = Adam(params, lr=2e-3)
-        wts = LossWeights(lambdaDet=1.0)
-
-        with Tensor.train():
-            Z0, roles0, bound0 = model(X0)
-            Y0p = proj(Y0)
-            lossRep0 = RelationalLoss(Z0, Y0p, roles0, wts)
-            boxes0, logits0, obj0 = det(bound0)
-
-            detLoss0 = Tensor(0.0)
-            for b in range(batch):
-                detLoss0 = detLoss0 + OtDetectionLoss(
-                    boxes0[b],
-                    logits0[b],
-                    gtBoxes0[b],
-                    gtLabels0[b],
-                    objLogit=obj0[b],
-                    eps=0.07,
-                    uot=True,
-                )
-
-            detLoss0 = detLoss0 / batch
-            loss0 = lossRep0 + wts.lambdaDet * detLoss0
-
-            opt.zero_grad()
-            loss0.backward()
-            opt.step()
-
-            for it in range(1, steps + 1):
-                X, Y, gtBoxesList, gtLabelsList, _ = SyntheticBatch(batch, H, W, numClasses)
-
-                Z, roles, bound = model(X)
-                Yp = proj(Y)
-                lossRep = RelationalLoss(Z, Yp, roles, wts)
-                boxes, logits, obj = det(bound)
-
-                detLoss = Tensor(0.0)
-                for b in range(batch):
-                    detLoss = detLoss + OtDetectionLoss(
-                        boxes[b],
-                        logits[b],
-                        gtBoxesList[b],
-                        gtLabelsList[b],
-                        objLogit=obj[b],
-                        eps=0.07,
-                        uot=True,
-                    )
-
-                detLoss = detLoss / batch
-                loss = lossRep + wts.lambdaDet * detLoss
-
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-
-                if it % 10 == 0:
-                    LogTrainingStep(it, loss, detLoss, Z, Yp)
-
-        return
-
-    assert yaml is not None, "PyYAML required for --data YAML. pip install pyyaml"
-    assert Image is not None, "Pillow required to load images. pip install pillow"
-
-    gen = YoloIterBatches(dataYaml, split, H, W, batch)
-    X0, Y0, gtBoxes0, gtLabels0, numClasses = next(gen)
-
-    proj = TargetProjection(dIn=Y0.shape[1], dOut=dModel)
-    model = RelationalBackbone(
-        dModel=dModel,
-        patch=8,
-        numSlots=2 * numRoles,
-        numRoles=numRoles,
-        nHead=4,
-    )
-    det = DetectionHead(dModel=dModel, numRoles=numRoles, numClasses=numClasses)
-
-    params = model.Parameters() + proj.Parameters() + det.Parameters()
-    EnableGrad(params)
-
-    opt = Adam(params, lr=2e-4)
-    wts = LossWeights(lambdaDet=1.0)
-
-    with Tensor.train():
-        Z0, roles0, bound0 = model(X0)
-        Y0p = proj(Y0)
-        lossRep0 = RelationalLoss(Z0, Y0p, roles0, wts)
-        boxes0, logits0, obj0 = det(bound0)
-
-        detLoss0 = Tensor(0.0)
-        for b in range(batch):
-            detLoss0 = detLoss0 + OtDetectionLoss(
-                boxes0[b],
-                logits0[b],
-                gtBoxes0[b],
-                gtLabels0[b],
-                objLogit=obj0[b],
-                eps=0.07,
-                uot=True,
-            )
-
-        detLoss0 = detLoss0 / batch
-        loss0 = lossRep0 + wts.lambdaDet * detLoss0
-
-        opt.zero_grad()
-        loss0.backward()
-        opt.step()
-
-        for it in range(1, steps + 1):
-            X, Y, gtBoxesList, gtLabelsList, _ = next(gen)
-
-            Z, roles, bound = model(X)
-            Yp = proj(Y)
-            lossRep = RelationalLoss(Z, Yp, roles, wts)
-            boxes, logits, obj = det(bound)
-
-            detLoss = Tensor(0.0)
-            for b in range(batch):
-                detLoss = detLoss + OtDetectionLoss(
-                    boxes[b],
-                    logits[b],
-                    gtBoxesList[b],
-                    gtLabelsList[b],
-                    objLogit=obj[b],
-                    eps=0.07,
-                    uot=True,
-                )
-
-            detLoss = detLoss / batch
-            loss = lossRep + wts.lambdaDet * detLoss
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            if it % 10 == 0:
-                LogTrainingStep(it, loss, detLoss, Z, Yp)
+        classes = 3
+    else:
+        config = ReadYaml(dataYaml)
+        classes = DatasetClassCount(config)
+    detector = RelationalDetector(classes, image_size=imgHw, model_width=dModel, roles=numRoles)
+    for step, loss in enumerate(detector.fit(dataYaml, steps=steps, batch=batch, split=split), 1):
+        if step == 1 or step % 10 == 0 or step == steps:
+            print(f"[{step:03d}] total={loss:.4f}")
 
 
 # CLI
